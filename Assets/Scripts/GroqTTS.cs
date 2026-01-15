@@ -5,35 +5,20 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-public enum PlayAIVoice
+/// <summary>
+/// Available voices for Groq Orpheus TTS (Canopy Labs)
+/// </summary>
+public enum OrpheusVoice
 {
-    Aaliyah_PlayAI,
-    Adelaide_PlayAI,
-    Angelo_PlayAI,
-    Arista_PlayAI,
-    Atlas_PlayAI,
-    Basil_PlayAI,
-    Briggs_PlayAI,
-    Calum_PlayAI,
-    Celeste_PlayAI,
-    Cheyenne_PlayAI,
-    Chip_PlayAI,
-    Cillian_PlayAI,
-    Deedee_PlayAI,
-    Eleanor_PlayAI,
-    Fritz_PlayAI,
-    Gail_PlayAI,
-    Indigo_PlayAI,
-    Jennifer_PlayAI,
-    Judy_PlayAI,
-    Mamaw_PlayAI,
-    Mason_PlayAI,
-    Mikail_PlayAI,
-    Mitch_PlayAI,
-    Nia_PlayAI,
-    Quinn_PlayAI,
-    Ruby_PlayAI,
-    Thunder_PlayAI
+    // Female voices
+    Autumn,
+    Diana,
+    Hannah,
+    
+    // Male voices
+    Austin,
+    Daniel,
+    Troy
 }
 
 public class GroqTTS : MonoBehaviour
@@ -42,9 +27,10 @@ public class GroqTTS : MonoBehaviour
 
     private const string apiUrl = "https://api.groq.com/openai/v1/audio/speech";
     [SerializeField] private string apiKey = "your_groq_api_key_here";
-    private const string model = "playai-tts";
-    [SerializeField] private PlayAIVoice selectedVoice = PlayAIVoice.Fritz_PlayAI;
+    private const string model = "canopylabs/orpheus-v1-english";
+    [SerializeField] private OrpheusVoice selectedVoice = OrpheusVoice.Troy;
     private const string responseFormat = "wav";
+    private const int maxInputLength = 200; // Orpheus has 200 character limit
     [SerializeField] private string prompt = "I love building and shipping new features for our students!";
 
     [Button]
@@ -55,39 +41,152 @@ public class GroqTTS : MonoBehaviour
 
     public async Task GenerateAndPlaySpeech(string text)
     {
+        // Split text into chunks if it exceeds Orpheus limit (200 chars)
+        var chunks = SplitTextIntoChunks(text, maxInputLength);
+        
         using var client = new HttpClient();
-
         client.DefaultRequestHeaders.Clear();
         client.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
 
-        var json = $"{{\"model\":\"{model}\",\"voice\":\"{GetVoiceName(selectedVoice)}\",\"input\":\"{text}\",\"response_format\":\"{responseFormat}\"}}";
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-        try
+        foreach (var chunk in chunks)
         {
-            var response = await client.PostAsync(apiUrl, content);
+            // Escape text for JSON
+            string escapedText = chunk.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", " ").Replace("\r", "");
+            var json = $"{{\"model\":\"{model}\",\"voice\":\"{GetVoiceName(selectedVoice)}\",\"input\":\"{escapedText}\",\"response_format\":\"{responseFormat}\"}}";
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            if (!response.IsSuccessStatusCode)
+            try
             {
-                Debug.LogError($"TTS API call failed: {response.StatusCode}");
-                Debug.LogError(await response.Content.ReadAsStringAsync());
-                return;
-            }
+                var response = await client.PostAsync(apiUrl, content);
 
-            byte[] audioData = await response.Content.ReadAsByteArrayAsync();
-            AudioClip clip = CreateClipFromWav(audioData);
-            audioSource.clip = clip;
-            audioSource.Play();
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError("Error generating TTS: " + ex.Message);
+                if (!response.IsSuccessStatusCode)
+                {
+                    Debug.LogError($"TTS API call failed: {response.StatusCode}");
+                    Debug.LogError(await response.Content.ReadAsStringAsync());
+                    return;
+                }
+
+                byte[] audioData = await response.Content.ReadAsByteArrayAsync();
+                AudioClip clip = CreateClipFromWav(audioData);
+                audioSource.clip = clip;
+                audioSource.Play();
+                
+                // Wait for audio to finish before playing next chunk
+                while (audioSource.isPlaying)
+                {
+                    await Task.Delay(100);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("Error generating TTS: " + ex.Message);
+            }
         }
     }
 
-    private string GetVoiceName(PlayAIVoice voice)
+    /// <summary>
+    /// Split text into chunks that fit within the Orpheus character limit.
+    /// Tries to split at sentence boundaries for natural speech.
+    /// </summary>
+    private System.Collections.Generic.List<string> SplitTextIntoChunks(string text, int maxLength)
     {
-        return voice.ToString().Replace('_', '-');
+        var chunks = new System.Collections.Generic.List<string>();
+        
+        if (string.IsNullOrEmpty(text))
+            return chunks;
+
+        if (text.Length <= maxLength)
+        {
+            chunks.Add(text);
+            return chunks;
+        }
+
+        // Split by sentences first
+        var sentenceEnders = new[] { ". ", "! ", "? ", ".\n", "!\n", "?\n" };
+        int currentStart = 0;
+        string currentChunk = "";
+
+        while (currentStart < text.Length)
+        {
+            // Find the next sentence boundary
+            int nextEnd = -1;
+            foreach (var ender in sentenceEnders)
+            {
+                int pos = text.IndexOf(ender, currentStart);
+                if (pos >= 0 && (nextEnd < 0 || pos < nextEnd))
+                {
+                    nextEnd = pos + ender.Length;
+                }
+            }
+
+            string segment;
+            if (nextEnd < 0 || nextEnd > text.Length)
+            {
+                // No more sentence boundaries, take the rest
+                segment = text.Substring(currentStart);
+                currentStart = text.Length;
+            }
+            else
+            {
+                segment = text.Substring(currentStart, nextEnd - currentStart);
+                currentStart = nextEnd;
+            }
+
+            // Check if adding this segment would exceed the limit
+            if ((currentChunk + segment).Length <= maxLength)
+            {
+                currentChunk += segment;
+            }
+            else
+            {
+                // Save current chunk if not empty
+                if (!string.IsNullOrWhiteSpace(currentChunk))
+                {
+                    chunks.Add(currentChunk.Trim());
+                }
+
+                // If segment itself is too long, split it by words
+                if (segment.Length > maxLength)
+                {
+                    var words = segment.Split(' ');
+                    currentChunk = "";
+                    foreach (var word in words)
+                    {
+                        if ((currentChunk + " " + word).Trim().Length <= maxLength)
+                        {
+                            currentChunk = (currentChunk + " " + word).Trim();
+                        }
+                        else
+                        {
+                            if (!string.IsNullOrWhiteSpace(currentChunk))
+                            {
+                                chunks.Add(currentChunk.Trim());
+                            }
+                            // If single word is too long, truncate it
+                            currentChunk = word.Length > maxLength ? word.Substring(0, maxLength) : word;
+                        }
+                    }
+                }
+                else
+                {
+                    currentChunk = segment;
+                }
+            }
+        }
+
+        // Don't forget the last chunk
+        if (!string.IsNullOrWhiteSpace(currentChunk))
+        {
+            chunks.Add(currentChunk.Trim());
+        }
+
+        return chunks;
+    }
+
+    private string GetVoiceName(OrpheusVoice voice)
+    {
+        // Orpheus uses lowercase voice names
+        return voice.ToString().ToLower();
     }
 
     private AudioClip CreateClipFromWav(byte[] wav)

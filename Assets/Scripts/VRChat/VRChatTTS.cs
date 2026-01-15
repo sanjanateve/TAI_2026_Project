@@ -9,40 +9,34 @@ using UnityEngine;
 namespace VRChat
 {
     /// <summary>
-    /// Available voices for Groq PlayAI TTS
+    /// Available voices for Groq Orpheus TTS (Canopy Labs)
     /// </summary>
     public enum TTSVoice
     {
         // Female voices
-        Aaliyah,
-        Adelaide,
-        Arista,
-        Celeste,
-        Cheyenne,
-        Deedee,
-        Eleanor,
-        Gail,
-        Indigo,
-        Jennifer,
-        Judy,
-        Mamaw,
-        Nia,
-        Ruby,
+        Autumn,
+        Diana,
+        Hannah,
         
         // Male voices
-        Angelo,
-        Atlas,
-        Basil,
-        Briggs,
-        Calum,
-        Chip,
-        Cillian,
-        Fritz,
-        Mason,
-        Mikail,
-        Mitch,
-        Quinn,
-        Thunder
+        Austin,
+        Daniel,
+        Troy
+    }
+
+    /// <summary>
+    /// Vocal direction presets for Orpheus TTS expressiveness
+    /// </summary>
+    public enum TTSTone
+    {
+        None,           // Natural conversational cadence
+        Friendly,       // Warm and approachable
+        Cheerful,       // Upbeat and positive
+        FriendlyCheerful, // Combination of friendly and cheerful
+        Professional,   // Business-like and formal
+        Calm,           // Relaxed and soothing
+        Excited,        // Energetic and enthusiastic
+        Warm            // Comforting and welcoming
     }
 
     /// <summary>
@@ -55,7 +49,8 @@ namespace VRChat
         [SerializeField] private string apiKey = "YOUR_GROQ_API_KEY";
         
         [Header("Voice Settings")]
-        [SerializeField] private TTSVoice selectedVoice = TTSVoice.Fritz;
+        [SerializeField] private TTSVoice selectedVoice = TTSVoice.Troy;
+        [SerializeField] private TTSTone tone = TTSTone.FriendlyCheerful;
         [SerializeField] [Range(0.5f, 2f)] private float volume = 1f;
 
         [Header("Audio")]
@@ -76,10 +71,16 @@ namespace VRChat
         public bool IsSpeaking => isSpeaking;
         public bool IsProcessing => isProcessing;
         public int QueueCount => speechQueue.Count;
+        
+        /// <summary>
+        /// Get the AudioSource used for TTS playback (for lip sync integration)
+        /// </summary>
+        public AudioSource AudioSource => audioSource;
 
         private const string API_URL = "https://api.groq.com/openai/v1/audio/speech";
-        private const string MODEL = "playai-tts";
+        private const string MODEL = "canopylabs/orpheus-v1-english";
         private const string RESPONSE_FORMAT = "wav";
+        private const int MAX_INPUT_LENGTH = 200; // Orpheus has 200 character limit
 
         private Queue<string> speechQueue = new Queue<string>();
         private bool isSpeaking = false;
@@ -165,27 +166,33 @@ namespace VRChat
             // Clean the text
             string cleanedText = CleanTextForTTS(text);
 
-            if (isSpeaking || isProcessing)
+            // Split into chunks if text exceeds Orpheus limit (200 chars)
+            List<string> chunks = SplitTextIntoChunks(cleanedText, MAX_INPUT_LENGTH);
+
+            foreach (string chunk in chunks)
             {
-                if (queueMessages && speechQueue.Count < maxQueueSize)
+                if (isSpeaking || isProcessing)
                 {
-                    speechQueue.Enqueue(cleanedText);
-                    Debug.Log($"[VRChatTTS] Queued speech ({speechQueue.Count} in queue)");
-                }
-                else if (!queueMessages)
-                {
-                    // Stop current and speak new
-                    Stop();
-                    StartSpeech(cleanedText);
+                    if (queueMessages && speechQueue.Count < maxQueueSize)
+                    {
+                        speechQueue.Enqueue(chunk);
+                        Debug.Log($"[VRChatTTS] Queued speech ({speechQueue.Count} in queue)");
+                    }
+                    else if (!queueMessages)
+                    {
+                        // Stop current and speak new
+                        Stop();
+                        StartSpeech(chunk);
+                    }
+                    else
+                    {
+                        Debug.LogWarning("[VRChatTTS] Queue full, dropping message");
+                    }
                 }
                 else
                 {
-                    Debug.LogWarning("[VRChatTTS] Queue full, dropping message");
+                    StartSpeech(chunk);
                 }
-            }
-            else
-            {
-                StartSpeech(cleanedText);
             }
         }
 
@@ -359,11 +366,15 @@ namespace VRChat
                 response_format = RESPONSE_FORMAT
             };
 
+            // Add vocal direction for expressiveness
+            string toneDirection = GetToneDirection(tone);
+            string inputWithTone = toneDirection + text;
+
             string json = JsonUtility.ToJson(new TTSRequest
             {
                 model = MODEL,
                 voice = voiceName,
-                input = text,
+                input = inputWithTone,
                 response_format = RESPONSE_FORMAT
             });
 
@@ -382,8 +393,39 @@ namespace VRChat
 
         private string GetVoiceName(TTSVoice voice)
         {
-            // Groq expects format like "Fritz-PlayAI"
-            return $"{voice}-PlayAI";
+            // Orpheus uses lowercase voice names
+            // Handle invalid enum values (from old PlayAI enum saved in scenes)
+            int voiceIndex = (int)voice;
+            if (voiceIndex < 0 || voiceIndex > 5)
+            {
+                Debug.LogWarning($"[VRChatTTS] Invalid voice enum value {voiceIndex}, defaulting to 'troy'");
+                return "troy";
+            }
+            return voice.ToString().ToLower();
+        }
+
+        private string GetToneDirection(TTSTone selectedTone)
+        {
+            return selectedTone switch
+            {
+                TTSTone.Friendly => "[friendly] ",
+                TTSTone.Cheerful => "[cheerful] ",
+                TTSTone.FriendlyCheerful => "[friendly] [cheerful] ",
+                TTSTone.Professional => "[professionally] ",
+                TTSTone.Calm => "[calm] ",
+                TTSTone.Excited => "[excited] ",
+                TTSTone.Warm => "[warm] ",
+                _ => "" // None = natural conversational cadence
+            };
+        }
+
+        /// <summary>
+        /// Set tone at runtime
+        /// </summary>
+        public void SetTone(TTSTone newTone)
+        {
+            tone = newTone;
+            Debug.Log($"[VRChatTTS] Tone changed to: {newTone}");
         }
 
         private string CleanTextForTTS(string text)
@@ -412,13 +454,106 @@ namespace VRChat
             // Trim
             text = text.Trim();
 
-            // Limit length (TTS has limits)
-            if (text.Length > 4096)
+            return text;
+        }
+
+        /// <summary>
+        /// Split text into chunks that fit within the Orpheus character limit.
+        /// Tries to split at sentence boundaries for natural speech.
+        /// </summary>
+        private List<string> SplitTextIntoChunks(string text, int maxLength)
+        {
+            var chunks = new List<string>();
+            
+            if (string.IsNullOrEmpty(text))
+                return chunks;
+
+            if (text.Length <= maxLength)
             {
-                text = text.Substring(0, 4093) + "...";
+                chunks.Add(text);
+                return chunks;
             }
 
-            return text;
+            // Split by sentences first
+            var sentenceEnders = new[] { ". ", "! ", "? ", ".\n", "!\n", "?\n" };
+            int currentStart = 0;
+            string currentChunk = "";
+
+            while (currentStart < text.Length)
+            {
+                // Find the next sentence boundary
+                int nextEnd = -1;
+                foreach (var ender in sentenceEnders)
+                {
+                    int pos = text.IndexOf(ender, currentStart);
+                    if (pos >= 0 && (nextEnd < 0 || pos < nextEnd))
+                    {
+                        nextEnd = pos + ender.Length;
+                    }
+                }
+
+                string segment;
+                if (nextEnd < 0 || nextEnd > text.Length)
+                {
+                    // No more sentence boundaries, take the rest
+                    segment = text.Substring(currentStart);
+                    currentStart = text.Length;
+                }
+                else
+                {
+                    segment = text.Substring(currentStart, nextEnd - currentStart);
+                    currentStart = nextEnd;
+                }
+
+                // Check if adding this segment would exceed the limit
+                if ((currentChunk + segment).Length <= maxLength)
+                {
+                    currentChunk += segment;
+                }
+                else
+                {
+                    // Save current chunk if not empty
+                    if (!string.IsNullOrWhiteSpace(currentChunk))
+                    {
+                        chunks.Add(currentChunk.Trim());
+                    }
+
+                    // If segment itself is too long, split it by words
+                    if (segment.Length > maxLength)
+                    {
+                        var words = segment.Split(' ');
+                        currentChunk = "";
+                        foreach (var word in words)
+                        {
+                            if ((currentChunk + " " + word).Trim().Length <= maxLength)
+                            {
+                                currentChunk = (currentChunk + " " + word).Trim();
+                            }
+                            else
+                            {
+                                if (!string.IsNullOrWhiteSpace(currentChunk))
+                                {
+                                    chunks.Add(currentChunk.Trim());
+                                }
+                                // If single word is too long, truncate it
+                                currentChunk = word.Length > maxLength ? word.Substring(0, maxLength) : word;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        currentChunk = segment;
+                    }
+                }
+            }
+
+            // Don't forget the last chunk
+            if (!string.IsNullOrWhiteSpace(currentChunk))
+            {
+                chunks.Add(currentChunk.Trim());
+            }
+
+            return chunks;
         }
 
         private AudioClip CreateClipFromWav(byte[] wav)

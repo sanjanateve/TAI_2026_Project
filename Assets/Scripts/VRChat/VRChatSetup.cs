@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.InputSystem;
 using TMPro;
 
 namespace VRChat
@@ -33,8 +34,18 @@ namespace VRChat
 
         [Header("Text-to-Speech")]
         [SerializeField] private bool enableTTS = true;
-        [SerializeField] private TTSVoice aiVoice = TTSVoice.Fritz;
+        [SerializeField] private TTSVoice aiVoice = TTSVoice.Troy;
         [SerializeField] private AudioSource ttsAudioSource; // Optional - will create if null
+
+        [Header("Speech-to-Text (Voice Input)")]
+        [SerializeField] private bool enableSTT = true;
+        [Tooltip("Use Meta Quest OVRInput for grip button (recommended for Quest)")]
+        [SerializeField] private bool useOVRInput = true;
+        [Tooltip("Which controller's grip to use")]
+        [SerializeField] private OVRInput.Controller sttGripController = OVRInput.Controller.RTouch;
+        [Tooltip("Only needed if useOVRInput is false")]
+        [SerializeField] private InputActionReference rightGripAction;
+        [SerializeField] private GameObject recordingIndicator;
 
         [Header("Speaking Indicator (Optional)")]
         [SerializeField] private GameObject speakingIndicator; // Show when AI is speaking
@@ -43,6 +54,7 @@ namespace VRChat
         private VRChatController chatController;
         private VRChatPrefabBuilder prefabBuilder;
         private VRChatTTS ttsManager;
+        private VRSpeechToText sttManager;
 
         private void Awake()
         {
@@ -93,7 +105,17 @@ namespace VRChat
                 SetupTTS();
             }
 
+            // Setup STT (voice input) if enabled
+            if (enableSTT)
+            {
+                SetupSTT();
+            }
+
             Debug.Log("[VRChatSetup] Setup complete! Ready to chat.");
+            if (enableSTT)
+            {
+                Debug.Log("[VRChatSetup] Voice input enabled - Hold RIGHT GRIP to speak, or press V key for testing.");
+            }
         }
 
         private void AutoFindUIElements()
@@ -275,6 +297,14 @@ namespace VRChat
 
             // Configure TTS
             ttsManager.SetApiKey(groqApiKey);
+            
+            // Validate voice enum (handle old PlayAI values saved in scene)
+            int voiceIndex = (int)aiVoice;
+            if (voiceIndex < 0 || voiceIndex > 5)
+            {
+                Debug.LogWarning($"[VRChatSetup] Invalid voice enum value {voiceIndex} (old PlayAI?), defaulting to Troy");
+                aiVoice = TTSVoice.Troy;
+            }
             ttsManager.SetVoice(aiVoice);
 
             // Set audio source if provided
@@ -303,7 +333,111 @@ namespace VRChat
             // Log errors
             ttsManager.OnError += (error) => Debug.LogError($"[VRChatTTS] {error}");
 
+            // Auto-connect TTS AudioSource to Avatar controllers for lip sync
+            ConnectTTSToAvatars();
+
             Debug.Log($"[VRChatSetup] TTS enabled with voice: {aiVoice}");
+        }
+
+        /// <summary>
+        /// Automatically connects the TTS AudioSource to all AvatarController and SimpleLipSync components
+        /// </summary>
+        private void ConnectTTSToAvatars()
+        {
+            if (ttsManager == null || ttsManager.AudioSource == null)
+            {
+                Debug.LogWarning("[VRChatSetup] TTS AudioSource not ready, will retry in Start");
+                StartCoroutine(ConnectTTSToAvatarsDelayed());
+                return;
+            }
+
+            DoConnectTTSToAvatars();
+        }
+
+        private System.Collections.IEnumerator ConnectTTSToAvatarsDelayed()
+        {
+            // Wait a frame for TTS to initialize its AudioSource
+            yield return null;
+            yield return null;
+            DoConnectTTSToAvatars();
+        }
+
+        private void DoConnectTTSToAvatars()
+        {
+            AudioSource ttsAudio = ttsManager?.AudioSource;
+            if (ttsAudio == null)
+            {
+                Debug.LogWarning("[VRChatSetup] TTS AudioSource still not available");
+                return;
+            }
+
+            // Find all AvatarController components and connect TTS AudioSource
+            var avatarControllers = FindObjectsByType<AvatarController>(FindObjectsSortMode.None);
+            foreach (var controller in avatarControllers)
+            {
+                controller.SetTTSAudioSource(ttsAudio);
+                Debug.Log($"[VRChatSetup] Connected TTS AudioSource to AvatarController on: {controller.gameObject.name}");
+            }
+
+            // Find all SimpleLipSync components and connect TTS AudioSource  
+            var lipSyncs = FindObjectsByType<SimpleLipSync>(FindObjectsSortMode.None);
+            foreach (var lipSync in lipSyncs)
+            {
+                lipSync.SetTTSAudioSource(ttsAudio);
+                Debug.Log($"[VRChatSetup] Connected TTS AudioSource to SimpleLipSync on: {lipSync.gameObject.name}");
+            }
+
+            if (avatarControllers.Length == 0 && lipSyncs.Length == 0)
+            {
+                Debug.Log("[VRChatSetup] No AvatarController or SimpleLipSync found in scene");
+            }
+        }
+
+        private void SetupSTT()
+        {
+            // Add/Get VRSpeechToText component
+            sttManager = gameObject.GetComponent<VRSpeechToText>();
+            if (sttManager == null)
+            {
+                sttManager = gameObject.AddComponent<VRSpeechToText>();
+            }
+
+            // Configure STT via reflection (to set serialized fields)
+            var sttType = typeof(VRSpeechToText);
+            var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+
+            // Set API key
+            sttManager.SetApiKey(groqApiKey);
+
+            // Set OVRInput settings
+            var useOVRField = sttType.GetField("useOVRInput", flags);
+            useOVRField?.SetValue(sttManager, useOVRInput);
+
+            var controllerField = sttType.GetField("gripController", flags);
+            controllerField?.SetValue(sttManager, sttGripController);
+
+            // Set grip action if provided (for non-OVR input)
+            if (rightGripAction != null)
+            {
+                var gripField = sttType.GetField("gripAction", flags);
+                gripField?.SetValue(sttManager, rightGripAction);
+            }
+
+            // Set recording indicator if provided
+            if (recordingIndicator != null)
+            {
+                var indicatorField = sttType.GetField("recordingIndicator", flags);
+                indicatorField?.SetValue(sttManager, recordingIndicator);
+            }
+
+            // Subscribe to events for feedback
+            sttManager.OnRecordingStarted += () => Debug.Log("[VRChatSetup] Voice recording started...");
+            sttManager.OnRecordingStopped += () => Debug.Log("[VRChatSetup] Voice recording stopped, processing...");
+            sttManager.OnTranscriptionReceived += (text) => Debug.Log($"[VRChatSetup] You said: \"{text}\"");
+            sttManager.OnError += (error) => Debug.LogError($"[VRChatSetup] STT Error: {error}");
+
+            string inputMethod = useOVRInput ? $"OVRInput ({sttGripController} grip)" : "Input System";
+            Debug.Log($"[VRChatSetup] Speech-to-Text enabled using {inputMethod}");
         }
 
         private void OnAIResponse(string text)
@@ -338,6 +472,14 @@ namespace VRChat
         public VRChatTTS GetTTSManager()
         {
             return ttsManager;
+        }
+
+        /// <summary>
+        /// Get the STT (Speech-to-Text) manager for external control
+        /// </summary>
+        public VRSpeechToText GetSTTManager()
+        {
+            return sttManager;
         }
 
         /// <summary>
