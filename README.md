@@ -6,3 +6,6 @@ My contributions focused on the **VR environment and character interaction**, in
 - Integrating a **3D avatar** into the scene
 - Implementing **C# scripts** for natural avatar movement and interaction
 - Supporting locomotion and smooth movement within the virtual environment
+- ## Demo
+
+https://github.com/sanjanateve/TAI_2026_Project/assets/video-demo.mp4
